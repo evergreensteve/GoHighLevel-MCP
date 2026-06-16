@@ -2,11 +2,22 @@
   "version": 2,
   "builds": [
     {
-      "src": "api/**/*.js",
+      "src": "package.json",
       "use": "@vercel/node"
     }
   ],
   "routes": [
-    { "src": "/(.*)", "dest": "/api/index.js" }
+    { 
+      "src": "/sse", 
+      "dest": "dist/index.js" 
+    },
+    { 
+      "src": "/messages", 
+      "dest": "dist/index.js" 
+    },
+    { 
+      "src": "/(.*)", 
+      "dest": "dist/index.js" 
+    }
   ]
-} 
+}
