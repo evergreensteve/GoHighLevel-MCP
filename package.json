@@ -17,7 +17,7 @@
   "scripts": {
     "build": "tsc",
     "dev": "nodemon --exec ts-node src/http-server.ts",
-    "start": "node dist/http-server.js",
+    "start": "node -r dotenv/config dist/http-server.js",
     "start:stdio": "node dist/server.js",
     "start:http": "node dist/http-server.js",
     "vercel-build": "npm run build",
