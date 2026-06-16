@@ -21,10 +21,4 @@ RUN npm ci --only=production
 
 EXPOSE 8000
 
-# Explicitly ensure the container passes the system variables to Node
-ENV NODE_ENV=production
-ENV GHL_API_KEY=$GHL_API_KEY
-ENV GHL_LOCATION_ID=$GHL_LOCATION_ID
-ENV GHL_BASE_URL=$GHL_BASE_URL
-
 CMD ["npm", "start"]
