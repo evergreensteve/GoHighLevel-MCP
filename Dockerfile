@@ -20,5 +20,6 @@ COPY --from=builder /app/dist ./dist
 RUN npm ci --only=production
 
 EXPOSE 8000
+ENV NODE_ENV=production
 
 CMD ["npm", "start"]
