@@ -24,7 +24,9 @@ ENV NODE_ENV=production
 
 # Hardcode the fallback variable directly into the container framework
 ENV GHL_API_KEY="pit-0dd8d596-fd7d-4641-8d67-711cfecfafa2"
-ENV GHL_LOCATION_ID="l9toy5fsA8hJZppjdgUz"
 ENV GHL_BASE_URL="https://services.leadconnectorhq.com"
+ENV GHL_LOCATION_ID="l9toy5fsA8hJZppjdgUz"
+ENV NODE_ENV="production"
+ENV PORT="8000"
 
 CMD ["npm", "start"]
