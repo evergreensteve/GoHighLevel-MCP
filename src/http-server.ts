@@ -5,11 +5,14 @@
 
 import express from 'express';
 import cors from 'cors';
+import { randomUUID } from 'node:crypto';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { 
   CallToolRequestSchema,
   ErrorCode,
+  isInitializeRequest,
   ListToolsRequestSchema,
   McpError 
 } from '@modelcontextprotocol/sdk/types.js';
@@ -43,7 +46,6 @@ dotenv.config();
  */
 class GHLMCPHttpServer {
   private app: express.Application;
-  private server: Server;
   private ghlClient: GHLApiClient;
   private contactTools: ContactTools;
   private conversationTools: ConversationTools;
@@ -64,6 +66,7 @@ class GHLMCPHttpServer {
   private productsTools: ProductsTools;
   private port: number;
   private sseTransports: Record<string, SSEServerTransport> = {};
+  private streamableTransports: Record<string, StreamableHTTPServerTransport> = {};
 
   constructor() {
     this.port = parseInt(process.env.PORT || process.env.MCP_SERVER_PORT || '8000');
@@ -71,19 +74,6 @@ class GHLMCPHttpServer {
     // Initialize Express app
     this.app = express();
     this.setupExpress();
-
-    // Initialize MCP server with capabilities
-    this.server = new Server(
-      {
-        name: 'ghl-mcp-server',
-        version: '1.0.0',
-      },
-      {
-        capabilities: {
-          tools: {},
-        },
-      }
-    );
 
     // Initialize GHL API client
     this.ghlClient = this.initializeGHLClient();
@@ -107,9 +97,31 @@ class GHLMCPHttpServer {
     this.storeTools = new StoreTools(this.ghlClient);
     this.productsTools = new ProductsTools(this.ghlClient);
 
-    // Setup MCP handlers
-    this.setupMCPHandlers();
+    // Setup HTTP routes (MCP handlers are attached per-session in createMcpServer)
     this.setupRoutes();
+  }
+
+  /**
+   * Create a fresh MCP Server instance with handlers attached.
+   * Called once per transport session (the SDK's Server/Protocol class
+   * only supports a single active transport connection at a time).
+   */
+  private createMcpServer(): Server {
+    const server = new Server(
+      {
+        name: 'ghl-mcp-server',
+        version: '1.0.0',
+      },
+      {
+        capabilities: {
+          tools: {},
+        },
+      }
+    );
+
+    this.setupMCPHandlers(server);
+
+    return server;
   }
 
   /**
@@ -165,11 +177,16 @@ class GHLMCPHttpServer {
   }
 
   /**
-   * Setup MCP request handlers
+   * Setup MCP request handlers on a given Server instance.
+   *
+   * Each transport session gets its own Server instance (the SDK's Protocol
+   * class only tracks a single active transport at a time), but all sessions
+   * share the same underlying tool implementations and GHL client, so the
+   * handler logic itself is identical across sessions.
    */
-  private setupMCPHandlers(): void {
+  private setupMCPHandlers(server: Server): void {
     // Handle list tools requests
-    this.server.setRequestHandler(ListToolsRequestSchema, async () => {
+    server.setRequestHandler(ListToolsRequestSchema, async () => {
       console.log('[GHL MCP HTTP] Listing available tools...');
       
       try {
@@ -226,7 +243,7 @@ class GHLMCPHttpServer {
     });
 
     // Handle tool execution requests
-    this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const { name, arguments: args } = request.params;
       
       console.log(`[GHL MCP HTTP] Executing tool: ${name}`);
@@ -352,42 +369,111 @@ class GHLMCPHttpServer {
       }
     });
 
-    // SSE endpoint for MCP clients (ChatGPT, Retell, Claude Desktop, etc.)
+    // MCP endpoint at /sse, supporting two transport protocols for backwards
+    // compatibility with different clients:
     //
-    // Per the MCP SSE transport spec, GET and POST serve different purposes:
-    //  - GET  /sse  opens the long-lived event stream and assigns a sessionId
-    //  - POST /sse?sessionId=...  delivers a JSON-RPC message to that session's transport
+    //  1. Deprecated HTTP+SSE transport (protocol version 2024-11-05)
+    //     - GET /sse opens the event stream and returns a sessionId via an
+    //       "event: endpoint" message (?sessionId=... query string)
+    //     - POST /sse?sessionId=... delivers a JSON-RPC message to that session
+    //     Used by: ChatGPT, Claude Desktop (older configs)
     //
-    // The previous implementation routed both methods to the same handler,
-    // which created a brand new SSEServerTransport (and a new dangling stream)
-    // on every POST instead of forwarding the message to the existing transport.
-    // That meant clients (e.g. Retell) sending tools/list via POST never received
-    // a response, and the tools picker would hang on "Loading" forever.
+    //  2. Streamable HTTP transport (protocol version 2025-03-26)
+    //     - POST /sse with no prior GET sends the "initialize" JSON-RPC call
+    //       directly; the server assigns a session and returns it via the
+    //       "Mcp-Session-Id" response header
+    //     - Subsequent requests (GET/POST/DELETE) include that header
+    //     Used by: Retell, and other modern MCP clients
+    //
+    // A previous version of this handler only implemented (1), and routed
+    // both GET and POST to the same code path, which created a new dangling
+    // stream on every POST instead of forwarding messages to the existing
+    // transport. Clients using (2), like Retell, POST "initialize" with no
+    // sessionId query param and no prior GET at all, so that version also
+    // rejected them outright with a 400. This version detects which protocol
+    // a given request is using and routes it to the matching transport.
+
+    const handleStreamableRequest = async (req: express.Request, res: express.Response) => {
+      const sessionIdHeader = req.headers['mcp-session-id'] as string | undefined;
+
+      try {
+        let transport: StreamableHTTPServerTransport;
+
+        if (sessionIdHeader && this.streamableTransports[sessionIdHeader]) {
+          transport = this.streamableTransports[sessionIdHeader];
+        } else if (!sessionIdHeader && req.method === 'POST' && isInitializeRequest(req.body)) {
+          transport = new StreamableHTTPServerTransport({
+            sessionIdGenerator: () => randomUUID(),
+            onsessioninitialized: (newSessionId) => {
+              console.log(`[GHL MCP HTTP] Streamable HTTP session initialized: ${newSessionId}`);
+              this.streamableTransports[newSessionId] = transport;
+            }
+          });
+
+          transport.onclose = () => {
+            const sid = transport.sessionId;
+            if (sid) {
+              console.log(`[GHL MCP HTTP] Streamable HTTP session closed: ${sid}`);
+              delete this.streamableTransports[sid];
+            }
+          };
+
+          const server = this.createMcpServer();
+          await server.connect(transport);
+        } else {
+          console.error(`[GHL MCP HTTP] Streamable HTTP request with missing/unknown session: ${sessionIdHeader || 'none'}`);
+          res.status(400).json({
+            jsonrpc: '2.0',
+            error: { code: -32000, message: 'Bad Request: No valid session ID provided' },
+            id: null,
+          });
+          return;
+        }
+
+        await transport.handleRequest(req, res, req.body);
+      } catch (error) {
+        console.error('[GHL MCP HTTP] Error handling Streamable HTTP request:', error);
+        if (!res.headersSent) {
+          res.status(500).json({
+            jsonrpc: '2.0',
+            error: { code: -32603, message: 'Internal server error' },
+            id: null,
+          });
+        }
+      }
+    };
 
     this.app.get('/sse', async (req, res) => {
-      const sessionId = (req.query.sessionId as string) || undefined;
-      console.log(`[GHL MCP HTTP] New SSE stream request from: ${req.ip}, sessionId: ${sessionId || 'new'}`);
+      // A request carrying an Mcp-Session-Id header (or referencing a known
+      // Streamable HTTP session) is a Streamable HTTP client reopening its
+      // notification stream, not a legacy SSE client starting a fresh one.
+      const sessionIdHeader = req.headers['mcp-session-id'] as string | undefined;
+      if (sessionIdHeader && this.streamableTransports[sessionIdHeader]) {
+        await handleStreamableRequest(req, res);
+        return;
+      }
+
+      console.log(`[GHL MCP HTTP] New legacy SSE stream request from: ${req.ip}`);
 
       try {
         const transport = new SSEServerTransport('/sse', res);
-
-        // SSEServerTransport generates its own sessionId; store it so POSTs can find it
         this.sseTransports[transport.sessionId] = transport;
 
         transport.onclose = () => {
-          console.log(`[GHL MCP HTTP] SSE stream closed for session: ${transport.sessionId}`);
+          console.log(`[GHL MCP HTTP] Legacy SSE stream closed for session: ${transport.sessionId}`);
           delete this.sseTransports[transport.sessionId];
         };
 
-        await this.server.connect(transport);
+        const server = this.createMcpServer();
+        await server.connect(transport);
 
-        console.log(`[GHL MCP HTTP] SSE stream established for session: ${transport.sessionId}`);
+        console.log(`[GHL MCP HTTP] Legacy SSE stream established for session: ${transport.sessionId}`);
 
         req.on('close', () => {
           delete this.sseTransports[transport.sessionId];
         });
       } catch (error) {
-        console.error(`[GHL MCP HTTP] SSE stream error:`, error);
+        console.error(`[GHL MCP HTTP] Legacy SSE stream error:`, error);
         if (!res.headersSent) {
           res.status(500).json({ error: 'Failed to establish SSE connection' });
         } else {
@@ -397,30 +483,39 @@ class GHLMCPHttpServer {
     });
 
     this.app.post('/sse', async (req, res) => {
-      const sessionId = (req.query.sessionId as string) || undefined;
+      const querySessionId = (req.query.sessionId as string) || undefined;
 
-      if (!sessionId) {
-        console.error('[GHL MCP HTTP] POST /sse received with no sessionId query param');
-        res.status(400).json({ error: 'Missing sessionId query parameter. Connect via GET /sse first to obtain one.' });
-        return;
-      }
+      // A query-string sessionId identifies a legacy SSE client sending a
+      // message to its already-open stream.
+      if (querySessionId) {
+        const transport = this.sseTransports[querySessionId];
 
-      const transport = this.sseTransports[sessionId];
-
-      if (!transport) {
-        console.error(`[GHL MCP HTTP] POST /sse for unknown sessionId: ${sessionId}`);
-        res.status(404).json({ error: 'Unknown sessionId. The SSE stream may have closed; reconnect via GET /sse.' });
-        return;
-      }
-
-      try {
-        await transport.handlePostMessage(req, res, req.body);
-      } catch (error) {
-        console.error(`[GHL MCP HTTP] Error handling POST message for session ${sessionId}:`, error);
-        if (!res.headersSent) {
-          res.status(500).json({ error: 'Failed to process message' });
+        if (!transport) {
+          console.error(`[GHL MCP HTTP] POST /sse for unknown legacy sessionId: ${querySessionId}`);
+          res.status(404).json({ error: 'Unknown sessionId. The SSE stream may have closed; reconnect via GET /sse.' });
+          return;
         }
+
+        try {
+          await transport.handlePostMessage(req, res, req.body);
+        } catch (error) {
+          console.error(`[GHL MCP HTTP] Error handling legacy POST message for session ${querySessionId}:`, error);
+          if (!res.headersSent) {
+            res.status(500).json({ error: 'Failed to process message' });
+          }
+        }
+        return;
       }
+
+      // No query-string sessionId: this is a Streamable HTTP client, either
+      // initializing a brand new session or sending a follow-up request
+      // identified by the Mcp-Session-Id header.
+      await handleStreamableRequest(req, res);
+    });
+
+    this.app.delete('/sse', async (req, res) => {
+      // Streamable HTTP clients may explicitly terminate their session.
+      await handleStreamableRequest(req, res);
     });
 
     // Root endpoint with server info
