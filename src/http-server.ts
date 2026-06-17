@@ -386,24 +386,6 @@ class GHLMCPHttpServer {
     this.app.get('/sse', handleSSE);
     this.app.post('/sse', handleSSE);
 
-    // Add a direct endpoint handler for Retell to bypass session negotiation
-    this.app.post('/mcp', async (req, res) => {
-      res.json({
-        jsonrpc: "2.0",
-        id: req.body.id || 1,
-        result: {
-          tools: [
-            {
-              name: "get_location",
-              description: "Get GoHighLevel location details",
-              inputSchema: { type: "object", properties: {} }
-            }
-            // This instantly satisfies Retell's loading check
-          ]
-        }
-      });
-    });
-
     // Root endpoint with server info
     this.app.get('/', (req, res) => {
       res.json({
