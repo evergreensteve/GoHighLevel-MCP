@@ -20,13 +20,18 @@ COPY --from=builder /app/dist ./dist
 RUN npm ci --only=production
 
 EXPOSE 8000
-ENV NODE_ENV=production
 
-# Hardcode the fallback variable directly into the container framework
-ENV GHL_API_KEY="pit-0dd8d596-fd7d-4641-8d67-711cfecfafa2"
-ENV GHL_BASE_URL="https://services.leadconnectorhq.com"
-ENV GHL_LOCATION_ID="l9toy5fsA8hJZppjdgUz"
-ENV NODE_ENV="production"
-ENV PORT="8000"
+# Pull the keys dynamically from your Railway Dashboard at boot time
+ARG GHL_API_KEY
+ARG GHL_LOCATION_ID
+ARG GHL_BASE_URL
+ARG NODE_ENV
+ARG PORT
+
+ENV GHL_API_KEY=$GHL_API_KEY
+ENV GHL_BASE_URL=$GHL_BASE_URL
+ENV GHL_LOCATION_ID=$GHL_LOCATION_ID
+ENV NODE_ENV=$NODE_ENV
+ENV PORT=$PORT
 
 CMD ["npm", "start"]
