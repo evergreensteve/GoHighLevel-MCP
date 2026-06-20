@@ -16,6 +16,7 @@
   },
   "scripts": {
     "build": "tsc",
+    "cache-bust": "echo 1",
     "dev": "nodemon --exec ts-node src/http-server.ts",
     "start": "node -r dotenv/config dist/http-server.js",
     "start:stdio": "node dist/server.js",
