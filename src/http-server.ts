@@ -857,6 +857,15 @@ function setupGracefulShutdown(): void {
  */
 async function main(): Promise<void> {
   try {
+    // Debug: print env var presence at startup (remove after confirming env vars work)
+    console.log('[DEBUG] ENV CHECK:', {
+      GHL_API_KEY: process.env.GHL_API_KEY ? `set (${process.env.GHL_API_KEY.length} chars)` : 'MISSING',
+      GHL_BASE_URL: process.env.GHL_BASE_URL || 'MISSING',
+      GHL_LOCATION_ID: process.env.GHL_LOCATION_ID || 'MISSING',
+      NODE_ENV: process.env.NODE_ENV || 'MISSING',
+      PORT: process.env.PORT || 'MISSING',
+    });
+
     // Setup graceful shutdown
     setupGracefulShutdown();
     
